@@ -4,7 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PDF 合并工具</title>
-  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.js"></script>
+  <script>
+    // 引入 PDFName 用于深度清理受损的 PDF 结构
+    const { PDFDocument, PDFName } = PDFLib;
+  </script>
   <style>
     * {
       margin: 0;
@@ -90,12 +94,17 @@
       flex: 1;
       color: #333;
       font-size: 0.95rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .file-item .size {
       color: #888;
       font-size: 0.85rem;
       margin: 0 15px;
+      min-width: 60px;
+      text-align: right;
     }
 
     .file-item .remove {
@@ -109,6 +118,7 @@
       font-size: 1rem;
       line-height: 1;
       transition: background 0.2s;
+      flex-shrink: 0;
     }
 
     .file-item .remove:hover {
@@ -170,46 +180,6 @@
       margin-top: 25px;
     }
 
-    .result-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 15px;
-      background: #f0f4ff;
-      border-radius: 10px;
-      margin-bottom: 10px;
-    }
-
-    .result-item .info {
-      flex: 1;
-    }
-
-    .result-item .info h3 {
-      color: #333;
-      font-size: 1rem;
-      margin-bottom: 5px;
-    }
-
-    .result-item .info p {
-      color: #666;
-      font-size: 0.85rem;
-    }
-
-    .download-btn {
-      padding: 10px 20px;
-      background: #2ed573;
-      color: white;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      font-weight: 500;
-      transition: background 0.2s;
-    }
-
-    .download-btn:hover {
-      background: #26b95f;
-    }
-
     .hidden {
       display: none;
     }
@@ -219,6 +189,33 @@
       text-align: center;
       color: #667eea;
       font-weight: 500;
+    }
+    
+    .error-msg {
+      color: #ff4757;
+      margin-top: 15px;
+      text-align: center;
+      font-weight: 500;
+      word-break: break-all;
+    }
+    
+    .skipped-notice {
+      margin-top: 15px;
+      padding: 15px;
+      background: #fff3f3;
+      border-left: 4px solid #ff4757;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      color: #d63031;
+    }
+
+    .skipped-notice ul {
+      margin-left: 20px;
+      margin-top: 5px;
+    }
+
+    .skipped-notice li {
+      margin-bottom: 3px;
     }
   </style>
 </head>
@@ -236,20 +233,19 @@
     <div class="file-list" id="fileList"></div>
 
     <div class="settings">
-      <label for="outputCount">合并后 PDF 数量:</label>
-      <input type="number" id="outputCount" value="4" min="1" max="100">
+      <label for="outputCount">合并后分配的 PDF 数量:</label>
+      <input type="number" id="outputCount" value="1" min="1" max="100">
     </div>
 
     <button class="merge-btn" id="mergeBtn" disabled>开始合并</button>
 
     <div class="progress hidden" id="progress"></div>
+    <div class="error-msg hidden" id="errorMsg"></div>
 
     <div class="results hidden" id="results"></div>
   </div>
 
   <script>
-    const { PDFDocument } = PDFLib;
-
     let uploadedFiles = [];
 
     const dropZone = document.getElementById('dropZone');
@@ -258,6 +254,7 @@
     const mergeBtn = document.getElementById('mergeBtn');
     const outputCount = document.getElementById('outputCount');
     const progress = document.getElementById('progress');
+    const errorMsg = document.getElementById('errorMsg');
     const results = document.getElementById('results');
 
     dropZone.addEventListener('click', () => fileInput.click());
@@ -282,6 +279,82 @@
       fileInput.value = '';
     });
 
+    async function readFileAsBytes(file) {
+      const buffer = await file.arrayBuffer();
+      return new Uint8Array(buffer);
+    }
+
+    async function mergePdfBytes(pdfFiles) {
+      const mergedPdf = await PDFDocument.create();
+      const skippedFiles = [];
+      
+      for (const fileData of pdfFiles) {
+        let pdf;
+        try {
+          // 尝试加载 PDF
+          pdf = await PDFDocument.load(fileData.bytes);
+        } catch (err) {
+          // 自动跳过加密保护或损坏的文件
+          if (err.message.toLowerCase().includes('encrypted')) {
+            console.warn(`文件 "${fileData.name}" 已加密保护，已自动跳过。`);
+            skippedFiles.push({ name: fileData.name, reason: '已加密保护' });
+          } else {
+            console.warn(`文件 "${fileData.name}" 读取失败，已自动跳过:`, err.message);
+            skippedFiles.push({ name: fileData.name, reason: '文件损坏或格式不支持' });
+          }
+          continue; // 跳过此文件，处理下一个
+        }
+        
+        const pageIndices = pdf.getPageIndices();
+        if (pageIndices.length === 0) continue;
+        
+        try {
+          const copiedPages = await mergedPdf.copyPages(pdf, pageIndices);
+          copiedPages.forEach((page) => mergedPdf.addPage(page));
+        } catch (err) {
+          console.warn(`[${fileData.name}] 正常复制抛出字典错误，尝试启动 PDF 结构净化并重试:`, err.message);
+          
+          try {
+            pdf.catalog.delete(PDFName.of('AcroForm'));
+            pdf.catalog.delete(PDFName.of('Outlines'));
+
+            const pages = pdf.getPages();
+            pages.forEach(p => {
+              if (p.node.has(PDFName.of('Annots'))) {
+                p.node.delete(PDFName.of('Annots'));
+              }
+            });
+
+            const cleanBytes = await pdf.save();
+            const cleanPdf = await PDFDocument.load(cleanBytes);
+            
+            const cleanCopiedPages = await mergedPdf.copyPages(cleanPdf, cleanPdf.getPageIndices());
+            cleanCopiedPages.forEach((page) => mergedPdf.addPage(page));
+            
+            console.log(`[${fileData.name}] PDF 净化并重试成功！`);
+          } catch (fallbackErr) {
+            // 如果净化后依然失败，记录并跳过
+            console.warn(`无法合并 "${fileData.name}"。该 PDF 内部结构严重损坏，已自动跳过。`);
+            skippedFiles.push({ name: fileData.name, reason: '内部结构严重损坏' });
+            continue;
+          }
+        }
+      }
+      
+      const pageCount = mergedPdf.getPageCount();
+      // 如果这组文件全被跳过了，直接返回 null
+      if (pageCount === 0) {
+        return { bytes: null, pageCount: 0, skippedFiles };
+      }
+
+      const savedBytes = await mergedPdf.save();
+      return {
+        bytes: savedBytes,
+        pageCount: pageCount,
+        skippedFiles: skippedFiles
+      };
+    }
+
     function handleFiles(files) {
       for (const file of files) {
         if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
@@ -298,9 +371,9 @@
         const item = document.createElement('div');
         item.className = 'file-item';
         item.innerHTML = `
-          <span class="name">${file.name}</span>
+          <span class="name" title="${file.name}">${file.name}</span>
           <span class="size">${formatSize(file.size)}</span>
-          <button class="remove" data-index="${index}">×</button>
+          <button class="remove" data-index="${index}" title="移除">×</button>
         `;
         fileList.appendChild(item);
       });
@@ -323,91 +396,109 @@
 
     function updateMergeButton() {
       mergeBtn.disabled = uploadedFiles.length === 0;
+      outputCount.max = Math.max(1, uploadedFiles.length);
     }
 
     mergeBtn.addEventListener('click', async () => {
-      const count = parseInt(outputCount.value) || 1;
+      let count = parseInt(outputCount.value) || 1;
+      count = Math.min(count, uploadedFiles.length);
+      
       if (count < 1) return;
 
       mergeBtn.disabled = true;
       progress.classList.remove('hidden');
+      errorMsg.classList.add('hidden');
       results.classList.add('hidden');
       results.innerHTML = '';
 
       try {
         progress.textContent = '正在读取 PDF 文件...';
         
-        const pdfData = [];
+        const pdfBytes = [];
         for (const file of uploadedFiles) {
-          const arrayBuffer = await file.arrayBuffer();
-          const uint8Array = new Uint8Array(arrayBuffer);
-          let pdf;
-          try {
-            pdf = await PDFDocument.load(uint8Array);
-          } catch (e) {
-            pdf = await PDFDocument.load(uint8Array, { ignoreEncryption: true });
-          }
-          pdfData.push({
+          const bytes = await readFileAsBytes(file);
+          pdfBytes.push({
             name: file.name,
-            pages: pdf.getPages().length,
             size: file.size,
-            doc: pdf
-          });
-        }
-
-        progress.textContent = `正在分配到 ${count} 个 PDF...`;
-        
-        const groups = distributeFiles(pdfData, count);
-
-        progress.textContent = '正在合并 PDF...';
-        
-        const mergedPdfs = [];
-        for (let i = 0; i < groups.length; i++) {
-          const mergedPdf = await PDFDocument.create();
-          let totalPages = 0;
-
-          for (const pdfInfo of groups[i]) {
-            const pages = await mergedPdf.copyPages(pdfInfo.doc, pdfInfo.doc.getPageIndices());
-            pages.forEach(page => {
-              mergedPdf.addPage(page);
-              totalPages++;
-            });
-          }
-
-          const bytes = await mergedPdf.save();
-          mergedPdfs.push({
-            name: `merged_${i + 1}.pdf`,
-            size: bytes.byteLength,
-            pages: totalPages,
             bytes: bytes
           });
-
-          progress.textContent = `已完成 ${i + 1}/${groups.length} 个 PDF`;
         }
 
-        progress.classList.add('hidden');
+        progress.textContent = `正在平衡分配到 ${count} 个 PDF 组...`;
+        
+        const groups = distributeFiles(pdfBytes, count);
+
+        const mergedPdfs = [];
+        const allSkippedFiles = []; // 汇总所有被跳过的文件
+
+        for (let i = 0; i < groups.length; i++) {
+          progress.textContent = `正在合并第 ${i + 1}/${groups.length} 个 PDF...`;
+          
+          const mergeResult = await mergePdfBytes(groups[i]);
+          
+          if (mergeResult.skippedFiles.length > 0) {
+            allSkippedFiles.push(...mergeResult.skippedFiles);
+          }
+
+          // 只有当有实际页面合并成功时才进行下载
+          if (mergeResult.pageCount > 0 && mergeResult.bytes) {
+            mergedPdfs.push({
+              name: `merged_part_${i + 1}.pdf`,
+              size: mergeResult.bytes.byteLength,
+              pages: mergeResult.pageCount,
+              bytes: mergeResult.bytes
+            });
+          }
+        }
+
+        progress.textContent = '合并处理完成，准备下载...';
 
         mergedPdfs.forEach((pdf, index) => {
-          const blob = new Blob([pdf.bytes], { type: 'application/pdf' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = pdf.name;
-          a.click();
-          URL.revokeObjectURL(url);
+          setTimeout(() => {
+            const blob = new Blob([pdf.bytes], { type: 'application/pdf' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = pdf.name;
+            a.click();
+            URL.revokeObjectURL(url);
+          }, index * 500); 
         });
 
+        progress.classList.add('hidden');
         results.classList.remove('hidden');
-        results.innerHTML = '<p style="text-align: center; color: #2ed573; font-weight: 500;">已自动下载 ' + mergedPdfs.length + ' 个 PDF</p>';
+
+        // 生成最终的成功与跳过提示
+        let resultHtml = '';
+        if (mergedPdfs.length > 0) {
+          resultHtml += `<p style="text-align: center; color: #2ed573; font-weight: 600; font-size: 1.1rem;">已成功生成并自动下载 ${mergedPdfs.length} 个 PDF 文件！</p>`;
+        } else {
+          resultHtml += `<p style="text-align: center; color: #ff9f43; font-weight: 600; font-size: 1.1rem;">所有文件均被跳过，没有生成任何合并文件。</p>`;
+        }
+
+        if (allSkippedFiles.length > 0) {
+          const skippedList = allSkippedFiles.map(f => `<li><strong>${f.name}</strong> (${f.reason})</li>`).join('');
+          resultHtml += `
+            <div class="skipped-notice">
+              <p style="font-weight: bold;">⚠️ 以下文件因出错已自动跳过：</p>
+              <ul>${skippedList}</ul>
+            </div>
+          `;
+        }
+
+        results.innerHTML = resultHtml;
 
       } catch (error) {
-        progress.textContent = '错误: ' + error.message;
+        progress.classList.add('hidden');
+        errorMsg.classList.remove('hidden');
+        errorMsg.textContent = '程序发生未知错误: ' + error.message;
         console.error(error);
       }
 
       mergeBtn.disabled = false;
     });
 
+    // 贪心算法：尽可能让各组的总体积均衡
     function distributeFiles(pdfData, groupCount) {
       if (groupCount === 1) {
         return [pdfData];
