@@ -380,33 +380,19 @@
         }
 
         progress.classList.add('hidden');
-        results.classList.remove('hidden');
 
         mergedPdfs.forEach((pdf, index) => {
-          const item = document.createElement('div');
-          item.className = 'result-item';
-          item.innerHTML = `
-            <div class="info">
-              <h3>${pdf.name}</h3>
-              <p>${pdf.pages} 页 · ${formatSize(pdf.size)}</p>
-            </div>
-            <button class="download-btn" data-index="${index}">下载</button>
-          `;
-          results.appendChild(item);
+          const blob = new Blob([pdf.bytes], { type: 'application/pdf' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = pdf.name;
+          a.click();
+          URL.revokeObjectURL(url);
         });
 
-        results.querySelectorAll('.download-btn').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const pdf = mergedPdfs[parseInt(btn.dataset.index)];
-            const blob = new Blob([pdf.bytes], { type: 'application/pdf' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = pdf.name;
-            a.click();
-            URL.revokeObjectURL(url);
-          });
-        });
+        results.classList.remove('hidden');
+        results.innerHTML = '<p style="text-align: center; color: #2ed573; font-weight: 500;">已自动下载 ' + mergedPdfs.length + ' 个 PDF</p>';
 
       } catch (error) {
         progress.textContent = '错误: ' + error.message;
