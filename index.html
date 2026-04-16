@@ -340,7 +340,7 @@
         const pdfData = [];
         for (const file of uploadedFiles) {
           const arrayBuffer = await file.arrayBuffer();
-          const pdf = await PDFDocument.load(arrayBuffer);
+          const pdf = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
           pdfData.push({
             name: file.name,
             pages: pdf.getPages().length,
